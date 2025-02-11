@@ -162,24 +162,18 @@ export async function sell(
   const transaction = new VersionedTransaction(messageV0);
   transaction.sign([wallet]);
   logger.info("sell tx sent!");
-  if (isJito) {
+  if (isJito)
     sendBundle(latestBlockhash.blockhash, transaction, mintPublicKey, wallet); // with jito
-    await new Promise((r) => setTimeout(r, 1000));
-    sendBundle(
-      latestBlockhash.blockhash,
-      transaction,
-      mintPublicKey,
-      dev_wallet
-    ); // with jito
-  } else simple_executeAndConfirm(transaction); // without jito
+  else simple_executeAndConfirm(transaction); // without jito
 }
 
 export async function buy(
   mintPublicKey: PublicKey,
   isJito: Boolean
-): Promise<void> {
+): Promise<boolean> {
   const maxRetries = 3;
   let attempt = 0;
+  const MIN_LIQUIDITY_SOL = 5; // Minimum 5 SOL liquidity required
 
   while (attempt < maxRetries) {
     try {
@@ -191,12 +185,34 @@ export async function buy(
         commitment: "processed",
       });
       const sdk = new PumpFunSDK(provider);
+
+      // Check bonding curve and liquidity
+      const bondingCurveAccount = await sdk.getBondingCurveAccount(mintPublicKey);
+      if (!bondingCurveAccount) {
+        if (attempt < maxRetries - 1) {
+          attempt++;
+          const delay = 500 * Math.pow(2, attempt - 1); // 500ms, 1000ms, 2000ms
+          logger.info(`Bonding curve not found, waiting ${delay}ms before retry ${attempt}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw new Error(`Bonding curve account not found: ${mintPublicKey.toBase58()}`);
+      }
+
+      // Check liquidity
+      const liquidityInSol = Number(bondingCurveAccount.realSolReserves) / LAMPORTS_PER_SOL;
+      logger.info(`Token ${mintPublicKey.toBase58()} liquidity: ${liquidityInSol} SOL`);
+      
+      if (liquidityInSol < MIN_LIQUIDITY_SOL) {
+        logger.info(`Skipping token ${mintPublicKey.toBase58()} - Insufficient liquidity (${liquidityInSol} SOL < ${MIN_LIQUIDITY_SOL} SOL)`);
+        return false; // Return false to indicate buy was skipped
+      }
+
       let ata = await getAssociatedTokenAddressSync(
         mintPublicKey,
         wallet.publicKey
       );
 
-      // this is where the buy instruction of pump.fun new token will be added
       logger.info(`Sniping token: ${mintPublicKey.toBase58()}`);
       const buyInstruction: Transaction = await sdk.buy(
         wallet,
@@ -232,7 +248,7 @@ export async function buy(
       else 
         await simple_executeAndConfirm(transaction); // without jito
       
-      return; // Success - exit the function
+      return true; // Return true to indicate successful buy
     } catch (error) {
       if (error instanceof Error && error.message.includes("Bonding curve") && attempt < maxRetries - 1) {
         attempt++;
@@ -245,6 +261,7 @@ export async function buy(
       throw error;
     }
   }
+  return false; // Return false if we exhausted all retries
 }
 
 export async function createAndBuy(

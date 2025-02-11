@@ -85,11 +85,16 @@ export async function streamAnyNewTokens(isAutoSell: boolean, sellAfterNumberBuy
       currentPumpFunToken = data.transaction.transaction.meta.postTokenBalances[0].mint
       logger.info(`New token created: ${currentPumpFunToken}`);
       if(count < n){
-        buy(new PublicKey(currentPumpFunToken), isJito);
-        logger.info(`Sniped ${1} times`);
-        if(isAutoSell) waitAndSellAll(currentPumpFunToken, isJito);
-        count += 1;
-    }
+        buy(new PublicKey(currentPumpFunToken), isJito).then(success => {
+          if (success) {
+            logger.info(`Successfully sniped token ${count + 1}/${n}`);
+            if(isAutoSell) waitAndSellAll(currentPumpFunToken, isJito);
+            count += 1;
+          }
+        }).catch(error => {
+          logger.error(`Error sniping token: ${error}`);
+        });
+      }
     }
   });
 
@@ -126,5 +131,3 @@ export async function streamTargetNewToken(mintAddress: string, isAutoSell: bool
     }
   });
 }
-
-
