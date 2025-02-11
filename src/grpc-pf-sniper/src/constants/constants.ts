@@ -1,4 +1,4 @@
-import { logger, retrieveEnvVariable } from "../../../../utils";
+import { logger, retrieveEnvVariable } from "../../../utils";
 import {
     Commitment
   } from "@solana/web3.js";

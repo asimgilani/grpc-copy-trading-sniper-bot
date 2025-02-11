@@ -26,12 +26,10 @@ import {
   QUOTE_AMOUNT,
   RPC_ENDPOINT,
   RPC_WEBSOCKET_ENDPOINT,
-  //PRIVATE_KEY_1,
 } from "../constants";
 import {
   AccountLayout,
   createAssociatedTokenAccountIdempotentInstruction,
-  createCloseAccountInstruction,
   getAssociatedTokenAddress,
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
@@ -180,67 +178,72 @@ export async function buy(
   mintPublicKey: PublicKey,
   isJito: Boolean
 ): Promise<void> {
-  try {
-    const Wallet = new NodeWallet(wallet);
-    const provider = new AnchorProvider(solanaConnection, Wallet, {
-      commitment: "processed",
-    });
-    const latestBlockhash = await solanaConnection.getLatestBlockhash({
-      commitment: "processed",
-    });
-    const sdk = new PumpFunSDK(provider);
-    let ata = await getAssociatedTokenAddressSync(
-      mintPublicKey,
-      wallet.publicKey
-    );
-    // this is where the buy instruction of pump.fun new token will be added
-    logger.info(`Sniping token: ${mintPublicKey.toBase58()}`);
-    const buyInstruction: Transaction = await sdk.buy(
-      wallet,
-      mintPublicKey,
-      BigInt(Number(quoteAmount.toFixed()) * LAMPORTS_PER_SOL)
-    );
+  const maxRetries = 3;
+  let attempt = 0;
 
-    const messageV0 = new TransactionMessage({
-      payerKey: wallet.publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: [
-        ...[
-          ComputeBudgetProgram.setComputeUnitLimit({
-            units: 71900,
-          }),
+  while (attempt < maxRetries) {
+    try {
+      const Wallet = new NodeWallet(wallet);
+      const provider = new AnchorProvider(solanaConnection, Wallet, {
+        commitment: "processed",
+      });
+      const latestBlockhash = await solanaConnection.getLatestBlockhash({
+        commitment: "processed",
+      });
+      const sdk = new PumpFunSDK(provider);
+      let ata = await getAssociatedTokenAddressSync(
+        mintPublicKey,
+        wallet.publicKey
+      );
+
+      // this is where the buy instruction of pump.fun new token will be added
+      logger.info(`Sniping token: ${mintPublicKey.toBase58()}`);
+      const buyInstruction: Transaction = await sdk.buy(
+        wallet,
+        mintPublicKey,
+        BigInt(Number(quoteAmount.toFixed()) * LAMPORTS_PER_SOL)
+      );
+
+      const messageV0 = new TransactionMessage({
+        payerKey: wallet.publicKey,
+        recentBlockhash: latestBlockhash.blockhash,
+        instructions: [
+          ...[
+            ComputeBudgetProgram.setComputeUnitLimit({
+              units: 71900,
+            }),
+          ],
+          createAssociatedTokenAccountIdempotentInstruction(
+            wallet.publicKey,
+            ata,
+            wallet.publicKey,
+            mintPublicKey
+          ),
+          ...buyInstruction.instructions,
         ],
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey,
-          ata,
-          wallet.publicKey,
-          mintPublicKey
-        ),
-        ...buyInstruction.instructions,
-      ],
-    }).compileToV0Message();
+      }).compileToV0Message();
 
-    let commitment: Commitment = retrieveEnvVariable(
-      "COMMITMENT_LEVEL",
-      logger
-    ) as Commitment;
+      const transaction = new VersionedTransaction(messageV0);
+      transaction.sign([wallet]);
 
-    const transaction = new VersionedTransaction(messageV0);
-
-    transaction.sign([wallet]);
-
-    //await sleep(30000);
-    logger.info("buy tx sent!");
-    /*const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), {
-          preflightCommitment: commitment,
-        });
-  */
-    //logger.info(`Sending bundle transaction with mint - ${signature}`);
-    if (isJito)
-      sendBundle(latestBlockhash.blockhash, transaction, mintPublicKey, wallet); // with jito
-    else simple_executeAndConfirm(transaction); // without jito
-  } catch (error) {
-    logger.error(error);
+      logger.info("buy tx sent!");
+      if (isJito)
+        sendBundle(latestBlockhash.blockhash, transaction, mintPublicKey, wallet); // with jito
+      else 
+        await simple_executeAndConfirm(transaction); // without jito
+      
+      return; // Success - exit the function
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Bonding curve") && attempt < maxRetries - 1) {
+        attempt++;
+        const delay = 500 * Math.pow(2, attempt - 1); // 500ms, 1000ms, 2000ms
+        logger.info(`Bonding curve not found, waiting ${delay}ms before retry ${attempt}/${maxRetries}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      logger.error(error);
+      throw error;
+    }
   }
 }
 
